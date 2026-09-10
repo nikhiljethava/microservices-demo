@@ -10,6 +10,9 @@ using Microsoft.Extensions.Hosting;
 using cartservice.cartstore;
 using cartservice.services;
 using Microsoft.Extensions.Caching.StackExchangeRedis;
+using OpenTelemetry.Exporter;
+using OpenTelemetry.Resources;
+using OpenTelemetry.Trace;
 
 namespace cartservice
 {
@@ -57,6 +60,42 @@ namespace cartservice
 
 
             services.AddGrpc();
+
+            ConfigureTracing(services);
+        }
+
+        // Emits a SERVER span for every inbound gRPC call, which is what pairs
+        // with the caller's CLIENT span to form the frontend -> cartservice and
+        // checkoutservice -> cartservice edges in App Topology. ASP.NET Core
+        // reads the inbound W3C traceparent header by default, so the spans
+        // join the caller's trace rather than starting a new one.
+        private void ConfigureTracing(IServiceCollection services)
+        {
+            if (Configuration["ENABLE_TRACING"] != "1")
+            {
+                Console.WriteLine("Tracing disabled.");
+                return;
+            }
+
+            string collectorAddr = Configuration["COLLECTOR_SERVICE_ADDR"];
+            if (string.IsNullOrEmpty(collectorAddr))
+            {
+                Console.WriteLine("Tracing enabled but COLLECTOR_SERVICE_ADDR is not set; traces will not be exported.");
+                return;
+            }
+
+            string serviceName = Configuration["OTEL_SERVICE_NAME"] ?? "cartservice";
+            Console.WriteLine($"Tracing enabled, exporting to {collectorAddr}");
+
+            services.AddOpenTelemetry()
+                .ConfigureResource(resource => resource.AddService(serviceName))
+                .WithTracing(tracing => tracing
+                    .AddAspNetCoreInstrumentation()
+                    .AddOtlpExporter(options =>
+                    {
+                        options.Endpoint = new Uri($"http://{collectorAddr}");
+                        options.Protocol = OtlpExportProtocol.Grpc;
+                    }));
         }
 
         // This method gets called by the runtime. Use this method to configure the HTTP request pipeline.

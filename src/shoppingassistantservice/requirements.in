@@ -4,3 +4,6 @@ langchain==1.2.0
 pillow==12.3.0
 langchain-google-alloydb-pg==0.13.0
 google-cloud-secret-manager==2.26.0
+opentelemetry-sdk==1.42.0
+opentelemetry-exporter-otlp-proto-grpc==1.42.0
+opentelemetry-instrumentation-flask==0.63b0

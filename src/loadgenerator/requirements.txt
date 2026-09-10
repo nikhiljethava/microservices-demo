@@ -33,6 +33,8 @@ gevent==25.9.1
     #   locust
 geventhttpclient==2.3.4
     # via locust
+googleapis-common-protos==1.75.3
+    # via opentelemetry-exporter-otlp-proto-http
 greenlet==3.2.4
     # via gevent
 h11==0.16.0
@@ -54,10 +56,33 @@ markupsafe==3.0.2
     #   werkzeug
 msgpack==1.1.1
     # via locust
+opentelemetry-api==1.42.0
+    # via
+    #   opentelemetry-exporter-otlp-proto-http
+    #   opentelemetry-sdk
+    #   opentelemetry-semantic-conventions
+opentelemetry-exporter-otlp-proto-common==1.42.0
+    # via opentelemetry-exporter-otlp-proto-http
+opentelemetry-exporter-otlp-proto-http==1.42.0
+    # via -r requirements.in
+opentelemetry-proto==1.42.0
+    # via
+    #   opentelemetry-exporter-otlp-proto-common
+    #   opentelemetry-exporter-otlp-proto-http
+opentelemetry-sdk==1.42.0
+    # via
+    #   -r requirements.in
+    #   opentelemetry-exporter-otlp-proto-http
+opentelemetry-semantic-conventions==0.63b0
+    # via opentelemetry-sdk
 packaging==25.0
     # via pytest
 pluggy==1.6.0
     # via pytest
+protobuf==6.33.6
+    # via
+    #   googleapis-common-protos
+    #   opentelemetry-proto
 psutil==7.1.0
     # via locust
 pygments==2.19.2
@@ -68,16 +93,27 @@ python-engineio==4.12.2
     # via
     #   locust
     #   python-socketio
-python-socketio[client]==5.13.0
+python-socketio==5.13.0
     # via locust
 pyzmq==27.1.0
     # via locust
 requests==2.32.5
     # via
     #   locust
+    #   opentelemetry-exporter-otlp-proto-http
     #   python-socketio
+setuptools==84.0.0
+    # via
+    #   zope-event
+    #   zope-interface
 simple-websocket==1.1.0
     # via python-engineio
+typing-extensions==4.16.0
+    # via
+    #   opentelemetry-api
+    #   opentelemetry-exporter-otlp-proto-http
+    #   opentelemetry-sdk
+    #   opentelemetry-semantic-conventions
 tzdata==2025.2
     # via faker
 urllib3==2.6.3
