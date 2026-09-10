@@ -114,6 +114,16 @@ spec:
           value: "10"
         - name: RATE
           value: "1"
+        {{- if .Values.googleCloudOperations.tracing }}
+        - name: ENABLE_TRACING
+          value: "1"
+        - name: OTEL_SERVICE_NAME
+          value: "{{ .Values.loadGenerator.name }}"
+        # OTLP over HTTP (4318), not gRPC: grpcio does not cooperate with
+        # Locust's gevent monkey-patching.
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: "http://{{ .Values.opentelemetryCollector.name }}:4318"
+        {{- end }}
         resources:
           {{- toYaml .Values.loadGenerator.resources | nindent 10 }}
 {{- if .Values.networkPolicies.create }}

@@ -12,6 +12,64 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# OpenTelemetry collector gateway.
+#
+# Traces are exported to the Google Cloud Telemetry API (telemetry.googleapis.com)
+# using the OTLP exporter, NOT the legacy `googlecloud` trace exporter. This is
+# deliberate: the legacy Cloud Trace API rewrites OpenTelemetry resource
+# attributes (e.g. into `g.co/r/...` span labels), and App Topology resolves a
+# span to a GKE workload by reading the raw OTLP resource attributes. Exporting
+# via OTLP keeps them intact.
+#
+# For App Topology to draw a runtime edge between two workloads, every span must
+# carry all of:
+#   cloud.provider = "gcp"
+#   cloud.account.id = <project id>
+#   cloud.region  OR  cloud.availability_zone   (regional vs zonal cluster)
+#   k8s.cluster.name
+#   k8s.namespace.name
+#   k8s.deployment.name   (or statefulset/daemonset/cronjob)
+# The `resourcedetection` processor supplies the cloud.* and k8s.cluster.name
+# attributes; the `k8sattributes` processor supplies the per-workload k8s.*
+# attributes by looking up the sending pod by its connection IP.
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: opentelemetrycollector
+---
+# The k8sattributes processor reads pod metadata from the API server to derive
+# k8s.deployment.name (pod -> replicaset -> deployment) for each span it sees.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: opentelemetrycollector
+rules:
+- apiGroups: [""]
+  resources: ["pods", "namespaces", "nodes"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["apps"]
+  resources: ["replicasets"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["extensions"]
+  resources: ["replicasets"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: opentelemetrycollector
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: opentelemetrycollector
+subjects:
+- kind: ServiceAccount
+  name: opentelemetrycollector
+  # Kustomize's namespace transformer rewrites this to match the overlay's
+  # namespace, so deploying into a non-default namespace needs no edit here.
+  namespace: default
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -27,6 +85,7 @@ spec:
       labels:
         app: opentelemetrycollector
     spec:
+      serviceAccountName: opentelemetrycollector
       securityContext:
         fsGroup: 1000
         runAsGroup: 1000
@@ -49,7 +108,7 @@ spec:
         - '/bin/sh'
         - '-c'
         - |
-           sed "s/{{PROJECT_ID}}/$(curl -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/project/project-id)/" /template/collector-gateway-config-template.yaml >> /conf/collector-gateway-config.yaml
+           sed "s/{{PROJECT_ID}}/$(wget -qO- --header 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/project/project-id)/" /template/collector-gateway-config-template.yaml >> /conf/collector-gateway-config.yaml
         volumeMounts:
         - name: collector-gateway-config-template
           mountPath: /template
@@ -69,6 +128,12 @@ spec:
         args:
         - --config=/conf/collector-gateway-config.yaml
         image: otel/opentelemetry-collector-contrib:0.159.0@sha256:1f2c54a30e713fac6b3ae77a1ec84010c2007e29ced8ec666214fc2f6739c1cc
+        resources:
+          requests:
+            cpu: 200m
+            memory: 256Mi
+          limits:
+            memory: 512Mi
         volumeMounts:
         - name: collector-gateway-config
           mountPath: /conf
@@ -94,6 +159,10 @@ spec:
     port: 4317
     protocol: TCP
     targetPort: 4317
+  - name: http-otlp
+    port: 4318
+    protocol: TCP
+    targetPort: 4318
   selector:
     app: opentelemetrycollector
   type: ClusterIP
@@ -106,21 +175,70 @@ metadata:
 # https://opentelemetry.io/docs/collector/configuration/
 data:
   collector-gateway-config-template.yaml: |
+    extensions:
+      # Authenticates to the Telemetry API with the collector's Application
+      # Default Credentials (Workload Identity, or the node service account).
+      googleclientauth:
+        project: "{{PROJECT_ID}}"
+        quota_project: "{{PROJECT_ID}}"
     receivers:
       otlp:
-        protocols: 
+        protocols:
           grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
     processors:
+      # Resolves the sending pod from the connection source IP and attaches its
+      # workload identity. k8s.deployment.name is the attribute App Topology
+      # uses to key a GKE Deployment node.
+      k8sattributes:
+        auth_type: serviceAccount
+        passthrough: false
+        pod_association:
+        - sources:
+          - from: connection
+        extract:
+          metadata:
+          - k8s.namespace.name
+          - k8s.pod.name
+          - k8s.pod.uid
+          - k8s.node.name
+          - k8s.deployment.name
+          - k8s.statefulset.name
+          - k8s.daemonset.name
+          - k8s.cronjob.name
+      # Supplies cloud.provider, cloud.account.id, cloud.region /
+      # cloud.availability_zone and k8s.cluster.name from the GKE metadata
+      # server. override:false so it never clobbers what k8sattributes resolved.
+      resourcedetection:
+        detectors: [gcp]
+        timeout: 10s
+        override: false
+      batch:
+        send_batch_size: 200
+        send_batch_max_size: 200
+        timeout: 5s
     exporters:
+      # Traces go to the Telemetry API so OTLP resource attributes survive
+      # verbatim. Do not swap this back to the `googlecloud` exporter without
+      # re-checking App Topology: the legacy trace API mangles resource
+      # attributes and edges stop resolving.
+      otlphttp:
+        endpoint: https://telemetry.googleapis.com
+        encoding: proto
+        auth:
+          authenticator: googleclientauth
       googlecloud:
-        project: {{PROJECT_ID}}
+        project: "{{PROJECT_ID}}"
     service:
+      extensions: [googleclientauth]
       pipelines:
         traces:
-          receivers: [otlp] # Receive otlp-formatted data from other collector instances
-          processors: []
-          exporters: [googlecloud] # Export traces directly to Google Cloud
+          receivers: [otlp]
+          processors: [k8sattributes, resourcedetection, batch]
+          exporters: [otlphttp]
         metrics:
           receivers: [otlp]
-          processors: []
-          exporters: [googlecloud] # Export metrics to Google Cloud
+          processors: [k8sattributes, resourcedetection, batch]
+          exporters: [googlecloud]

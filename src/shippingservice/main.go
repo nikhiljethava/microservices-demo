@@ -22,9 +22,15 @@ import (
 
 	"cloud.google.com/go/profiler"
 	"github.com/sirupsen/logrus"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
+	"go.opentelemetry.io/otel/propagation"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/health"
 	"google.golang.org/grpc/reflection"
 	"google.golang.org/grpc/status"
@@ -54,10 +60,13 @@ func init() {
 }
 
 func main() {
-	if os.Getenv("DISABLE_TRACING") == "" {
-		log.Info("Tracing enabled, but temporarily unavailable")
-		log.Info("See https://github.com/GoogleCloudPlatform/microservices-demo/issues/422 for more info.")
-		go initTracing()
+	// initTracing must run synchronously: otelgrpc captures the global
+	// TracerProvider when the stats handler is constructed below, so starting
+	// it in a goroutine would race and leave the handler with a no-op provider.
+	tracingEnabled := os.Getenv("ENABLE_TRACING") == "1"
+	if tracingEnabled {
+		log.Info("Tracing enabled.")
+		initTracing()
 	} else {
 		log.Info("Tracing disabled.")
 	}
@@ -81,11 +90,9 @@ func main() {
 	}
 
 	var srv *grpc.Server
-	if os.Getenv("DISABLE_STATS") == "" {
-		log.Info("Stats enabled, but temporarily unavailable")
-		srv = grpc.NewServer()
+	if tracingEnabled {
+		srv = grpc.NewServer(grpc.StatsHandler(otelgrpc.NewServerHandler()))
 	} else {
-		log.Info("Stats disabled.")
 		srv = grpc.NewServer()
 	}
 	svc := &server{}
@@ -157,7 +164,39 @@ func initStats() {
 }
 
 func initTracing() {
-	// TODO(arbrown) Implement OpenTelemetry tracing
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*3)
+	defer cancel()
+
+	collectorAddr := os.Getenv("COLLECTOR_SERVICE_ADDR")
+	if collectorAddr == "" {
+		log.Warn("COLLECTOR_SERVICE_ADDR not set, tracing will not be exported")
+		return
+	}
+
+	conn, err := grpc.NewClient(collectorAddr,
+		grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		log.Warnf("warn: failed to connect to trace collector %s: %v", collectorAddr, err)
+		return
+	}
+
+	exporter, err := otlptracegrpc.New(ctx, otlptracegrpc.WithGRPCConn(conn))
+	if err != nil {
+		log.Warnf("warn: failed to create trace exporter: %v", err)
+		return
+	}
+
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithBatcher(exporter),
+		sdktrace.WithSampler(sdktrace.AlwaysSample()))
+	otel.SetTracerProvider(tp)
+
+	// Without this the incoming traceparent header is dropped and every span
+	// this service emits starts a new trace, which breaks the caller -> callee
+	// edge in App Topology.
+	otel.SetTextMapPropagator(
+		propagation.NewCompositeTextMapPropagator(
+			propagation.TraceContext{}, propagation.Baggage{}))
 }
 
 func initProfiling(service, version string) {

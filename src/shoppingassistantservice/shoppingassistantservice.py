@@ -59,8 +59,37 @@ vectorstore = AlloyDBVectorStore.create_sync(
     metadata_columns=["id", "name", "categories"]
 )
 
+def init_tracing(app):
+    """Instruments Flask so inbound requests continue the caller's trace.
+
+    Flask auto-instrumentation reads the W3C traceparent header the frontend
+    sends and emits a SERVER span as a child of it, which is what App Topology
+    needs to draw the frontend -> shoppingassistantservice edge.
+    """
+    if os.environ.get("ENABLE_TRACING") != "1":
+        print("Tracing disabled.")
+        return
+    try:
+        from opentelemetry import trace
+        from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
+            OTLPSpanExporter,
+        )
+        from opentelemetry.instrumentation.flask import FlaskInstrumentor
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.sdk.trace.export import BatchSpanProcessor
+
+        provider = TracerProvider()
+        provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
+        trace.set_tracer_provider(provider)
+        FlaskInstrumentor().instrument_app(app)
+        print("Tracing enabled.")
+    except Exception as e:  # noqa: BLE001 - telemetry must not break the app
+        print(f"Failed to initialize tracing, continuing without it: {e}")
+
+
 def create_app():
     app = Flask(__name__)
+    init_tracing(app)
 
     @app.route("/", methods=['POST'])
     def talkToGemini():

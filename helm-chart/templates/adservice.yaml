@@ -75,6 +75,24 @@ spec:
         env:
         - name: PORT
           value: "9555"
+        {{- if .Values.googleCloudOperations.tracing }}
+        # Zero-code instrumentation via the OpenTelemetry Java agent baked into
+        # the image; JAVA_TOOL_OPTIONS is what activates it.
+        - name: JAVA_TOOL_OPTIONS
+          value: "-javaagent:/opt/opentelemetry-javaagent.jar"
+        - name: OTEL_SERVICE_NAME
+          value: "{{ .Values.adService.name }}"
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: "http://{{ .Values.opentelemetryCollector.name }}:4317"
+        - name: OTEL_EXPORTER_OTLP_PROTOCOL
+          value: "grpc"
+        - name: OTEL_TRACES_EXPORTER
+          value: "otlp"
+        - name: OTEL_METRICS_EXPORTER
+          value: "none"
+        - name: OTEL_LOGS_EXPORTER
+          value: "none"
+        {{- end }}
         resources:
           {{- toYaml .Values.adService.resources | nindent 10 }}
         readinessProbe:

@@ -31,30 +31,34 @@ gcloud services enable \
     monitoring.googleapis.com \
     cloudtrace.googleapis.com \
     cloudprofiler.googleapis.com \
+    telemetry.googleapis.com \
     --project ${PROJECT_ID}
 ```
 
-In addition to that, you will need to grant the following IAM roles associated to your Google Service Account (GSA):
+In addition to that, the collector's Kubernetes ServiceAccount needs permission
+to write telemetry. With Workload Identity you can grant the roles directly to
+the Kubernetes ServiceAccount principal, with no Google Service Account in the
+middle:
 
 ```bash
 PROJECT_ID=<your-gcp-project-id>
-GSA_NAME=<your-gsa>
+PROJECT_NUMBER=$(gcloud projects describe ${PROJECT_ID} --format='value(projectNumber)')
+NAMESPACE=<your-namespace>   # e.g. default
 
-gcloud projects add-iam-policy-binding ${PROJECT_ID} \
-  --member "serviceAccount:${GSA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com" \
-  --role roles/cloudtrace.agent
+MEMBER="principal://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${PROJECT_ID}.svc.id.goog/subject/ns/${NAMESPACE}/sa/opentelemetrycollector"
 
+# Writes traces via the Telemetry (OTLP) API.
 gcloud projects add-iam-policy-binding ${PROJECT_ID} \
-  --member "serviceAccount:${GSA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com" \
-  --role roles/monitoring.metricWriter
-  
+  --member "${MEMBER}" --role roles/telemetry.writer
+
+# Required because the Telemetry API bills quota against the project.
 gcloud projects add-iam-policy-binding ${PROJECT_ID} \
-  --member "serviceAccount:${GSA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com" \
-  --role roles/cloudprofiler.agent
+  --member "${MEMBER}" --role roles/serviceusage.serviceUsageConsumer
+
+# Only needed for the metrics pipeline, which still uses the googlecloud exporter.
+gcloud projects add-iam-policy-binding ${PROJECT_ID} \
+  --member "${MEMBER}" --role roles/monitoring.metricWriter
 ```
-
-**Note**
-Currently only trace is supported.  Support for metrics, and more is coming soon.
 
 ## Changes
 
@@ -88,6 +92,40 @@ Currently, this component adds a single collector service which collects traces 
 ![Collector Architecture Diagram](collector-model.png)
 
 If you wish to experiment with different backends, you can modify the appropriate lines in [otel-collector.yaml](otel-collector.yaml) to export traces or metrics to a different backend.  See the [OpenTelemetry docs](https://opentelemetry.io/docs/collector/configuration/) for more details.
+
+## App Topology / runtime edges
+
+App Topology draws a runtime edge between two workloads when it can pair a
+caller's span with a callee's span *and* resolve both spans back to a concrete
+GKE workload. Resolution is by resource attribute, and the full set must be
+present on the span:
+
+| Attribute | Supplied by |
+| --- | --- |
+| `cloud.provider` (`"gcp"`) | `resourcedetection` processor, `gcp` detector |
+| `cloud.account.id` (project **ID**, not number) | `resourcedetection` |
+| `cloud.region` *or* `cloud.availability_zone` | `resourcedetection` (regional vs zonal cluster) |
+| `k8s.cluster.name` | `resourcedetection` |
+| `k8s.namespace.name` | `k8sattributes` processor |
+| `k8s.deployment.name` (or statefulset/daemonset/cronjob) | `k8sattributes` processor |
+
+Two things in this component exist specifically to satisfy that, and are easy to
+break by accident:
+
+1. **Traces are exported over OTLP to `telemetry.googleapis.com`, not with the
+   `googlecloud` exporter.** The legacy Cloud Trace API rewrites OpenTelemetry
+   resource attributes (into `g.co/r/...` span labels), and App Topology matches
+   on the raw OTLP attribute names. Switching the traces pipeline back to the
+   `googlecloud` exporter will keep traces flowing to Cloud Trace and silently
+   remove every runtime edge.
+2. **The collector needs RBAC.** The `k8sattributes` processor maps the sending
+   pod's connection IP to its pod, then walks pod → ReplicaSet → Deployment. That
+   requires read access to `pods`, `namespaces`, `nodes` and `replicasets`, which
+   the ClusterRole in this component grants.
+
+Edges also need trace context to actually propagate. Every service here installs
+the W3C `tracecontext` propagator; if a service starts a fresh trace instead of
+continuing the caller's, its spans have no parent and no edge is produced.
 
 ## Workload Identity
 

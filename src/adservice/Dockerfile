@@ -37,6 +37,16 @@ FROM eclipse-temurin:25.0.4_7-jre-alpine@sha256:3137541deb3cac6626b5d9a4a2187bc0
 #     | tar xzv -C /opt/cprof && \
 #     rm -rf profiler_java_agent.tar.gz
 
+# OpenTelemetry Java agent, used for zero-code gRPC instrumentation. The agent
+# is only activated when JAVA_TOOL_OPTIONS points at it, which the
+# google-cloud-operations kustomize component sets; otherwise it sits unused and
+# the service behaves exactly as before.
+ARG OTEL_AGENT_VERSION=2.31.1
+ARG OTEL_AGENT_SHA256=bbf83c151b6400709e2f225bdd07a04f839d9d13b8b93464241333fd25d3e3ba
+RUN wget -q -O /opt/opentelemetry-javaagent.jar \
+      "https://repo1.maven.org/maven2/io/opentelemetry/javaagent/opentelemetry-javaagent/${OTEL_AGENT_VERSION}/opentelemetry-javaagent-${OTEL_AGENT_VERSION}.jar" && \
+    echo "${OTEL_AGENT_SHA256}  /opt/opentelemetry-javaagent.jar" | sha256sum -c -
+
 WORKDIR /app
 COPY --from=builder /app .
 

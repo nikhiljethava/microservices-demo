@@ -1,2 +1,4 @@
 locust==2.43.0
 faker==40.1.0
+opentelemetry-sdk==1.42.0
+opentelemetry-exporter-otlp-proto-http==1.42.0

@@ -14,11 +14,66 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import random
 from locust import FastHttpUser, TaskSet, between
 from faker import Faker
 import datetime
 fake = Faker()
+
+
+def _init_tracing():
+    """Sets up OpenTelemetry, returning a tracer or None if tracing is off.
+
+    The load generator is the root of every trace in the demo: it starts the
+    trace and injects the W3C traceparent header, which the frontend picks up.
+    Without it each service would start its own disconnected trace and App
+    Topology would have no parent/child spans to derive edges from.
+
+    Note this uses the OTLP *HTTP* exporter, not gRPC. Locust monkey-patches
+    the world with gevent, and grpcio needs special handling to cooperate with
+    that; the HTTP exporter sits on top of requests and just works.
+    """
+    if os.environ.get("ENABLE_TRACING") != "1":
+        return None
+    try:
+        from opentelemetry import trace
+        from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
+            OTLPSpanExporter,
+        )
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.sdk.trace.export import BatchSpanProcessor
+
+        provider = TracerProvider()
+        # Endpoint comes from the standard OTEL_EXPORTER_OTLP_ENDPOINT env var.
+        provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
+        trace.set_tracer_provider(provider)
+        return trace.get_tracer("loadgenerator")
+    except Exception as e:  # noqa: BLE001 - never let telemetry break load gen
+        print(f"Failed to initialize tracing, continuing without it: {e}")
+        return None
+
+
+tracer = _init_tracing()
+
+
+def request(l, method, path, *args, **kwargs):
+    """Issues an HTTP request wrapped in a CLIENT span with trace context."""
+    call = getattr(l.client, method)
+    if tracer is None:
+        return call(path, *args, **kwargs)
+
+    from opentelemetry import trace
+    from opentelemetry.propagate import inject
+
+    with tracer.start_as_current_span(
+        f"{method.upper()} {path}",
+        kind=trace.SpanKind.CLIENT,
+        attributes={"http.request.method": method.upper(), "url.path": path},
+    ):
+        headers = dict(kwargs.pop("headers", None) or {})
+        inject(headers)
+        return call(path, *args, headers=headers, **kwargs)
 
 products = [
     '0PUK6V6EV0',
@@ -32,33 +87,33 @@ products = [
     'OLJCESPC7Z']
 
 def index(l):
-    l.client.get("/")
+    request(l, "get", "/")
 
 def setCurrency(l):
     currencies = ['EUR', 'USD', 'JPY', 'CAD', 'GBP', 'TRY']
-    l.client.post("/setCurrency",
+    request(l, "post", "/setCurrency",
         {'currency_code': random.choice(currencies)})
 
 def browseProduct(l):
-    l.client.get("/product/" + random.choice(products))
+    request(l, "get", "/product/" + random.choice(products))
 
 def viewCart(l):
-    l.client.get("/cart")
+    request(l, "get", "/cart")
 
 def addToCart(l):
     product = random.choice(products)
-    l.client.get("/product/" + product)
-    l.client.post("/cart", {
+    request(l, "get", "/product/" + product)
+    request(l, "post", "/cart", {
         'product_id': product,
         'quantity': random.randint(1,10)})
     
 def empty_cart(l):
-    l.client.post('/cart/empty')
+    request(l, "post", '/cart/empty')
 
 def checkout(l):
     addToCart(l)
     current_year = datetime.datetime.now().year+1
-    l.client.post("/cart/checkout", {
+    request(l, "post", "/cart/checkout", {
         'email': fake.email(),
         'street_address': fake.street_address(),
         'zip_code': fake.zipcode(),
@@ -72,7 +127,7 @@ def checkout(l):
     })
     
 def logout(l):
-    l.client.get('/logout')  
+    request(l, "get", '/logout')  
 
 
 class UserBehavior(TaskSet):
