@@ -189,6 +189,19 @@ data:
           http:
             endpoint: 0.0.0.0:4318
     processors:
+      # Two sources of pure noise, dropped before anything else runs. Kubelet
+      # gRPC health probes have no incoming trace context, so each one becomes
+      # its own single-span trace; and the gRPC instrumentation in several
+      # services traces the service's own OTLP export call, which is a
+      # telemetry-about-telemetry feedback loop. Neither has children, so
+      # dropping them cannot orphan anything.
+      filter/noise:
+        error_mode: ignore
+        traces:
+          span:
+          - 'IsMatch(name, "^.*grpc\\.health\\.v1\\.Health/Check$")'
+          - 'IsMatch(name, "^.*opentelemetry\\.proto\\.collector\\.trace\\.v1\\.TraceService/Export$")'
+          - 'attributes["url.path"] == "/_healthz"'
       # Resolves the sending pod from the connection source IP and attaches its
       # workload identity (k8s.deployment.name and friends).
       k8sattributes:
@@ -213,6 +226,27 @@ data:
         detectors: [gcp]
         timeout: 10s
         override: false
+        gcp:
+          # This gateway describes its OWN pod, so host.* would label every
+          # service's spans with the collector's node. k8sattributes already
+          # supplies the real k8s.node.name for the sending pod.
+          resource_attributes:
+            host.id:
+              enabled: false
+            host.name:
+              enabled: false
+            host.type:
+              enabled: false
+      # The Telemetry API routes a request to a project using gcp.project_id and
+      # rejects the whole batch with HTTP 400 "Resource is missing required
+      # attribute" without it. resourcedetection supplies cloud.account.id,
+      # which is what App Topology matches on, but not this one -- both are
+      # needed, for different reasons.
+      resource:
+        attributes:
+        - key: gcp.project_id
+          value: {{ .Values.opentelemetryCollector.projectId | quote }}
+          action: upsert
       batch:
         send_batch_size: 200
         send_batch_max_size: 200
@@ -235,7 +269,7 @@ data:
       pipelines:
         traces:
           receivers: [otlp]
-          processors: [k8sattributes, resourcedetection, batch]
+          processors: [filter/noise, k8sattributes, resourcedetection, resource, batch]
           exporters: [otlphttp]
         metrics:
           receivers: [otlp]

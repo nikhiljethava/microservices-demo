@@ -56,9 +56,16 @@ if(process.env.ENABLE_TRACING == "1") {
 
   const opentelemetry = require('@opentelemetry/sdk-node');
 
-  const { OTLPTraceExporter } = require('@opentelemetry/exporter-otlp-grpc');
+  // Must stay in step with @opentelemetry/sdk-trace-base. SDK 2.x replaced
+  // ReadableSpan.parentSpanId with parentSpanContext; the old
+  // @opentelemetry/exporter-otlp-grpc still read parentSpanId, got undefined,
+  // and shipped every span as a trace root. traceId still serialized fine, so
+  // the traces looked healthy and only App Topology noticed: no parent means
+  // no caller/callee pair, means no runtime edge.
+  const { OTLPTraceExporter } = require('@opentelemetry/exporter-trace-otlp-grpc');
 
-  const collectorUrl = process.env.COLLECTOR_SERVICE_ADDR;
+  const collectorAddr = process.env.COLLECTOR_SERVICE_ADDR;
+  const collectorUrl = collectorAddr.includes('://') ? collectorAddr : `http://${collectorAddr}`;
   const traceExporter = new OTLPTraceExporter({url: collectorUrl});
   const sdk = new opentelemetry.NodeSDK({
     resource: resourceFromAttributes({
